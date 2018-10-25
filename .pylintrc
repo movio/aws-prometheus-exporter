@@ -1,0 +1,12 @@
+[MASTER]
+
+disable=missing-docstring,
+        useless-import-alias
+
+[FORMAT]
+
+max-line-length=120
+
+[TYPECHECK]
+
+ignored-classes=Gauge,Counter,Histogram
