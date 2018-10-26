@@ -1,87 +1,102 @@
 # -*- coding: utf-8 -*-
 
 import re
+import sys
+import time
+import threading
 from collections import namedtuple
 
 import yaml
-from prometheus_client import Gauge
+import boto3
+from prometheus_client import REGISTRY, Gauge, start_http_server
 
 AwsMetric = namedtuple("AwsMetric", [
     "name",
     "description",
-    "type",
-    "value_label",
     "service",
     "paginator",
-    "filters",
+    "paginator_args",
+    "update_freq_mins",
     "search"
 ])
 
-VALID_TYPES = [
-    "array_to_unit_gauge"
-]
+class MetricThread(threading.Thread):
+    def __init__(self, metric, registry, session):
+        super().__init__()
+        self.metric = metric
+        self.registry = registry
+        self.session = session
 
+        self.gauge = None
 
-class AwsMetricsCollector:
-
-    VALID_METRIC_NAME_RE = re.compile("^[a-z_0-9]+$")
-
-    def __init__(self, yaml_string, collector_registry=None):
-        parsed_metrics = yaml.load(yaml_string)
-        self.metrics = tuple(self._create_aws_metric(k, v) for k, v in parsed_metrics.items())
-        self.registry = collector_registry
-        self.gauges = {}
-
-    def run(self, boto3_session, label_names, label_values):
-        for metric in self.metrics:
-            self._run_metric(metric, boto3_session, label_names, label_values)
-
-    def _run_metric(self, metric, boto3_session, label_names, label_values):
-        if metric.type == "array_to_unit_gauge":
-            return self._run_array_to_unit_gauge_metric(metric, boto3_session, label_names, label_values)
-        raise ValueError("Unknow metric type: '%s'" % metric.type)
-
-    def _run_array_to_unit_gauge_metric(self, metric, boto3_session, label_names, label_values):
-        gauge = self._get_gauge(metric.name, metric.description, label_names + [metric.value_label])
-        for value in self._get_response_iterator(boto3_session, metric):
-            gauge.labels(*(label_values + [value])).set(1)
-        return gauge
+    def _step(self):
+        resps = list(self._get_response_iterator())
+        keys = resps and [k for k in resps[0].keys() if k != "value"]
+        gauge = self._get_gauge(self.metric.name, self.metric.description, keys)
+        for resp in resps:
+            value = resp.pop("value")
+            assert list(resp.keys()) == keys
+            gauge.labels(*resp.values()).set(value)
+            
+    def _get_response_iterator(self):
+        service = self.session.client(self.metric.service)
+        paginator = service.get_paginator(self.metric.paginator)
+        response_iterator = paginator.paginate(**self.metric.paginator_args)
+        return response_iterator.search(self.metric.search)
 
     def _get_gauge(self, name, description, labels):
-        # pylint: disable=unexpected-keyword-arg
-        if name not in self.gauges:
-            self.gauges[name] = Gauge(name, description, labels, registry=self.registry)
-        return self.gauges[name]
+        if self.gauge:
+            return self.gauge
+        else:
+            gauge = Gauge(name, description, labels, registry=self.registry)
+            self.gauge = gauge
+            return gauge
 
-    @staticmethod
-    def _get_response_iterator(boto3_session, metric):
-        service = boto3_session.client(metric.service)
-        paginator = service.get_paginator(metric.paginator)
-        response_iterator = paginator.paginate(Filters=metric.filters)
-        return response_iterator.search(metric.search)
+    def run(self):
+        while True:
+            self._step()
+            time.sleep(self.metric.update_freq_mins * 60)
 
-    @classmethod
-    def _create_aws_metric(cls, metric_name, parsed_metric):
-        if not cls.VALID_METRIC_NAME_RE.match(metric_name):
+_VALID_METRIC_NAME_RE = re.compile("^[a-z_0-9]+$")
+
+def _parse_metrics(yaml_string):
+    obj = yaml.load(yaml_string)
+    ret = []
+    for metric_name, parsed_metric in obj.items():
+        if not _VALID_METRIC_NAME_RE.match(metric_name):
             raise ValueError("metric name '%s' does not match [a-z_0-9]+" % metric_name)
-        for field in ('description', 'type', 'service', 'paginator', 'search'):
-            if field not in parsed_metric:
+            
+        def get_field(field):
+            ret = parsed_metric.get(field)
+            if ret is None:
                 raise ValueError("metric '%s' is missing mandatory field '%s'" % (metric_name, field))
-        if 'filters' not in parsed_metric:
-            parsed_metric['filters'] = []
-        if parsed_metric['type'] not in VALID_TYPES:
-            raise ValueError("metric '%s' has unknown type '%s'" % (metric_name, parsed_metric['type']))
-        if parsed_metric['type'] == "array_to_unit_gauge" and "value_label" not in parsed_metric:
-            raise ValueError("metric '%s' of type 'array_to_unit_gauge' must have a 'value_label' field" % metric_name)
-        if 'value_label' not in parsed_metric:
-            parsed_metric['value_label'] = None
-        return AwsMetric(
+            return ret
+            
+        ret.append(AwsMetric(
             name=metric_name,
-            description=parsed_metric["description"],
-            type=parsed_metric['type'],
-            value_label=parsed_metric["value_label"],
-            filters=parsed_metric["filters"],
-            service=parsed_metric["service"],
-            paginator=parsed_metric["paginator"],
-            search=parsed_metric["search"]
-        )
+            description=get_field("description").strip(),
+            service=get_field("service").strip(),
+            paginator=get_field("paginator").strip(),
+            paginator_args=parsed_metric.get("paginator_args", {}),
+            update_freq_mins=parsed_metric.get("update_freq_mins", 5),
+            search=get_field("search").strip()
+        ))
+
+    return ret
+
+if __name__ == "__main__":
+    with open(sys.argv[1]) as f:
+        cfg = f.read()
+    registry = REGISTRY
+    session = boto3.session.Session()
+
+    metrics = _parse_metrics(cfg)
+    for metric in metrics:
+        thread = MetricThread(metric, registry, session)
+        thread.start()
+
+    start_http_server(8000)
+    print("Server started.")
+
+    while True:
+        time.sleep(1000)
