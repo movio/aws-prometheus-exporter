@@ -142,21 +142,23 @@ def test_get_response_iterator():
     mocks.paginate_response_iterator.search.assert_called_once_with(
         "Reservations[].Instances[].{id: InstanceId, value: `1`}[]")
 
-#
-# def test_run_metric():
-#     response_iterator = iter([
-#         { "id": "instance_id_1", "value": 1},
-#         { "id": "instance_id_2", "value": 1},
-#         { "id": "instance_id_3", "value": 1}
-#     ])
-#     mocks = create_session_mocks(response_iterator)
-#     metrics_collector = AwsMetricsCollector(SINGLE_METRIC_YAML)
-#     gauge = metrics_collector._run_metric(
-#         metrics_collector.metrics[0], mocks.session)
-#     assert gauge._labelnames == ("id",)
-#     metric_values = {labels: gauge._value._value for labels, gauge in gauge._metrics.items()}
-#     assert metric_values == {
-#         ('instance_id_1',): 1.0,
-#         ('instance_id_2',): 1.0,
-#         ('instance_id_3',): 1.0
-#     }
+
+def test_run_metric():
+    response_iterator = iter([
+        { "id": "instance_id_1", "value": 1},
+        { "id": "instance_id_2", "value": 1},
+        { "id": "instance_id_3", "value": 1}
+    ])
+    mocks = create_session_mocks(response_iterator)
+    metrics = parse_aws_metrics(SINGLE_METRIC_YAML)
+    assert len(metrics) == 1
+    thread = AwsMetricCollectorThread(metric=metrics[0], registry=None, session=mocks.session)
+    thread._step()
+    gauge = thread.gauge
+    assert gauge._labelnames == ("id",)
+    metric_values = {labels: gauge._value._value for labels, gauge in gauge._metrics.items()}
+    assert metric_values == {
+        ('instance_id_1',): 1.0,
+        ('instance_id_2',): 1.0,
+        ('instance_id_3',): 1.0
+    }

@@ -3,6 +3,7 @@
 import re
 import sys
 import time
+import datetime
 import threading
 from collections import namedtuple
 
@@ -32,6 +33,20 @@ class AwsMetricCollectorThread(threading.Thread):
         self.session = session
         self.gauge = None
 
+    def _get_paginator_args(self):
+        if isinstance(self.metric.paginator_args, dict):
+            return self.metric.paginator_args
+        elif isinstance(self.metric.paginator_args, str):
+            d = eval(self.metric.paginator_args, {
+                "datetime": datetime.datetime
+            })
+            if not isinstance(d, dict):
+                raise ValueError("paginator_args '%s' should eval to a dict" % self.metric.paginator_args)
+            return d
+        else:
+            raise ValueError("paginator_args '%s' should either be or eval to a dict" % self.metric.paginator_args)
+
+
     def _step(self):
         resps = list(self._get_response_iterator())
         keys = resps and [k for k in resps[0].keys() if k != "value"]
@@ -44,7 +59,7 @@ class AwsMetricCollectorThread(threading.Thread):
     def _get_response_iterator(self):
         service = self.session.client(self.metric.service)
         paginator = service.get_paginator(self.metric.paginator)
-        response_iterator = paginator.paginate(**self.metric.paginator_args)
+        response_iterator = paginator.paginate(**self._get_paginator_args())
         return response_iterator.search(self.metric.search)
 
     def _get_gauge(self, name, description, labels):
@@ -62,7 +77,6 @@ class AwsMetricCollectorThread(threading.Thread):
 
 
 VALID_METRIC_NAME_RE = re.compile("^[a-z_0-9]+$")
-
 
 def parse_aws_metrics(yaml_string):
     parsed_yaml = yaml.load(yaml_string)
