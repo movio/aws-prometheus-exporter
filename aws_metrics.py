@@ -110,10 +110,10 @@ def main():
     with open(sys.argv[1]) as metrics_file:
         cfg = metrics_file.read()
     registry = REGISTRY
-    session = boto3.session.Session()
 
     metrics = parse_aws_metrics(cfg)
     for metric in metrics:
+        session = boto3.session.Session()
         thread = AwsMetricCollectorThread(metric, registry, session)
         thread.start()
 
