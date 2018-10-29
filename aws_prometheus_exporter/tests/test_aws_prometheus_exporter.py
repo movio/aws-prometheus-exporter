@@ -3,7 +3,7 @@
 import unittest.mock as mock
 from collections import namedtuple
 
-from aws_metrics import parse_aws_metrics, AwsMetric, AwsMetricCollectorThread
+from aws_prometheus_exporter import parse_aws_metrics, AwsMetric, AwsMetricCollectorThread
 
 # pylint: disable=protected-access
 
@@ -145,9 +145,9 @@ def test_get_response_iterator():
 
 def test_run_metric():
     response_iterator = iter([
-        { "id": "instance_id_1", "value": 1},
-        { "id": "instance_id_2", "value": 1},
-        { "id": "instance_id_3", "value": 1}
+        {"id": "instance_id_1", "value": 1},
+        {"id": "instance_id_2", "value": 1},
+        {"id": "instance_id_3", "value": 1}
     ])
     mocks = create_session_mocks(response_iterator)
     metrics = parse_aws_metrics(SINGLE_METRIC_YAML)

@@ -1,0 +1,5 @@
+boto3>=1.9
+prometheus-client>=0.4
+pyyaml>=3.13
+pylint
+pytest

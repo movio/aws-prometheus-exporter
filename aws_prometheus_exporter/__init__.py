@@ -46,7 +46,6 @@ class AwsMetricCollectorThread(threading.Thread):
         else:
             raise ValueError("paginator_args '%s' should either be or eval to a dict" % self.metric.paginator_args)
 
-
     def _step(self):
         resps = list(self._get_response_iterator())
         keys = resps and [k for k in resps[0].keys() if k != "value"]
@@ -77,6 +76,7 @@ class AwsMetricCollectorThread(threading.Thread):
 
 
 VALID_METRIC_NAME_RE = re.compile("^[a-z_0-9]+$")
+
 
 def parse_aws_metrics(yaml_string):
     parsed_yaml = yaml.load(yaml_string)
