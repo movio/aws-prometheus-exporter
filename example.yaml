@@ -1,0 +1,26 @@
+ec2_instance_ids:
+  description: EC2 instance ids
+  value_label: instance_id
+  service: ec2
+  paginator: describe_instances
+  paginator_args:
+    Filters:
+      - Name: instance-state-name
+        Values: [ "running" ]
+  label_names:
+    - instance_id
+  search: |
+    Reservations[].Instances[].{instance_id: InstanceId, value: `1`}
+
+recent_emr_cluster_ids:
+  description: Recent EMR cluster ids
+  service: emr
+  paginator: list_clusters
+  paginator_args: |
+    {
+        "CreatedAfter": datetime.now() - timedelta(weeks=4)
+    }
+  label_names:
+    - id
+  search: |
+    Clusters[].{id: Id, value: `1`}

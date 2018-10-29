@@ -4,14 +4,20 @@ import re
 import sys
 import time
 import datetime
-import threading
+import argparse
+import unittest.mock as mock
 from collections import namedtuple
+from threading import Thread, Lock, Event
 
 import yaml
 import boto3
-from prometheus_client import REGISTRY, Gauge, start_http_server
+from prometheus_client.core import REGISTRY, GaugeMetricFamily
+from prometheus_client import start_http_server
 
-__all__ = ["AwsMetric", "AwsMetricCollectorThread", "parse_aws_metrics"]
+__all__ = ["AwsMetric", "AwsMetricsCollector", "parse_aws_metrics"]
+
+
+VALID_METRIC_NAME_RE = re.compile("^[a-z_0-9]+$")
 
 AwsMetric = namedtuple("AwsMetric", [
     "name",
@@ -19,66 +25,88 @@ AwsMetric = namedtuple("AwsMetric", [
     "service",
     "paginator",
     "paginator_args",
-    "update_freq_mins",
+    "label_names",
     "search"
 ])
 
+AwsMetric.__doc__ = """
+AwsMetric object describe a Gauge obtained from a boto3 API call.
 
-class AwsMetricCollectorThread(threading.Thread):
+name: the Prometheus metric name (must match ^[a-z_0-9]+$)
+description: the Prometheus metric description
+service: the AWS service, as per boto3.Session::client(service)
+paginator: the name of the boto3 paginator (e.g. 'list_objects' for the 's3' service)
+paginator_args: kwargs to be given to the paginator
+search: JMESPath expression used for client-side filtration and projection (must evaluate to a list of dicts)
+label_names: keys of the dicts returned by the JMESPath expression (also the label names of the Prometheus gauge)
+"""
 
-    def __init__(self, metric, registry, session):
+
+class AwsMetricsCollector:
+    """
+    Prometheus Collector for AwsMetric objects. Must be registered with a CollectorRegistry.
+    Call update() periodically to refresh the gauge values (this method is thread-safe).
+    See __main__.py for an example of usage.
+    """
+
+    def __init__(self, metrics, session, label_names=None, label_values=None):
+        """
+        metrics: a list of AwsMetric objects
+        session: a boto3 session with an AWS region_name configured
+        label_names (optional): a list of extra labels names to add to the underlying GaugeMetricFamily
+        label_values (optional): corresponding values for label_names
+        """
         super().__init__()
-        self.metric = metric
-        self.registry = registry
-        self.session = session
-        self.gauge = None
+        self._session = session
+        self._metrics = metrics
+        self._data_lock = Lock()
+        self._data = {}  # dict of metric_name to list of (label_values, value)
+        self._label_names = label_names or []
+        self._label_values = label_values or []
 
-    def _get_paginator_args(self):
-        if isinstance(self.metric.paginator_args, dict):
-            return self.metric.paginator_args
-        elif isinstance(self.metric.paginator_args, str):
-            d = eval(self.metric.paginator_args, {
-                "datetime": datetime.datetime
-            })
-            if not isinstance(d, dict):
-                raise ValueError("paginator_args '%s' should eval to a dict" % self.metric.paginator_args)
-            return d
-        else:
-            raise ValueError("paginator_args '%s' should either be or eval to a dict" % self.metric.paginator_args)
+    def update(self):
+        """
+        Makes the boto3 API calls, collects the results, and stores them for use when collect() gets
+        called by prometheus_client. Should be called regularly to maintain up-to-date metrics.
+        Calling this too frequently may cause Rate Exceeded errors.
+        This method is thread-safe.
+        """
+        with self._data_lock:
+            self._data = {}
+            for metric in self._metrics:
+                self._data[metric.name] = self._collect_metric(metric)
 
-    def _step(self):
-        resps = list(self._get_response_iterator())
-        keys = resps and [k for k in resps[0].keys() if k != "value"]
-        gauge = self._get_gauge(self.metric.name, self.metric.description, keys)
-        for resp in resps:
-            value = resp.pop("value")
-            assert list(resp.keys()) == keys
-            gauge.labels(*resp.values()).set(value)
+    def collect(self):
+        """
+        Yields GaugeMetricFamily objects, as expected by CollectorRegistry.
+        This method is thread-safe.
+        """
+        with self._data_lock:
+            for m in self._metrics:
+                gauge = GaugeMetricFamily(m.name, m.description, labels=self._label_names + m.label_names)
+                for (label_values, value) in self._data.get(m.name, []):
+                    gauge.add_metric(label_values, value)
+                yield gauge
 
-    def _get_response_iterator(self):
-        service = self.session.client(self.metric.service)
-        paginator = service.get_paginator(self.metric.paginator)
-        response_iterator = paginator.paginate(**self._get_paginator_args())
-        return response_iterator.search(self.metric.search)
-
-    def _get_gauge(self, name, description, labels):
-        if self.gauge:
-            return self.gauge
-        # pylint: disable=unexpected-keyword-arg
-        gauge = Gauge(name, description, labels, registry=self.registry)
-        self.gauge = gauge
-        return gauge
-
-    def run(self):
-        while True:
-            self._step()
-            time.sleep(self.metric.update_freq_mins * 60)
-
-
-VALID_METRIC_NAME_RE = re.compile("^[a-z_0-9]+$")
+    def _collect_metric(self, metric):
+        service = self._session.client(metric.service)
+        paginator = service.get_paginator(metric.paginator)
+        paginate_response_iterator = paginator.paginate(**metric.paginator_args)
+        responses = list(paginate_response_iterator.search(metric.search))
+        assert all(isinstance(r, dict) for r in responses), "responses '%s' must a sequence of dicts" % responses
+        result = []
+        for response in responses:
+            assert "value" in response, "response object '%s' is missing a 'value' property" % response
+            assert isinstance(response["value"], (float, int)), "the `value` property must be a number"
+            value = response.pop("value")
+            result.append((self._label_values + [response[label] for label in metric.label_names], value))
+        return result
 
 
 def parse_aws_metrics(yaml_string):
+    """
+    Parses a YAML-formatted document and returns a list of AwsMetric objects.
+    """
     parsed_yaml = yaml.load(yaml_string)
     metrics = []
 
@@ -88,41 +116,28 @@ def parse_aws_metrics(yaml_string):
             raise ValueError("metric '%s' is missing mandatory field '%s'" % (metric_name, field_name))
         return field_value
 
+    def eval_paginator_args(paginator_args):
+        # pylint: disable=eval-used
+        if isinstance(paginator_args, dict):
+            return paginator_args
+        if isinstance(paginator_args, str):
+            paginator_args = eval(paginator_args, {"datetime": datetime.datetime, "timedelta": datetime.timedelta})
+            if not isinstance(paginator_args, dict):
+                raise ValueError("paginator_args '%s' should eval to a dict" % self.metric.paginator_args)
+            return paginator_args
+        raise ValueError("paginator_args '%s' is not a str or dict" % self.metric.paginator_args)
+
     for metric_name, parsed_metric in parsed_yaml.items():
         if not VALID_METRIC_NAME_RE.match(metric_name):
-            raise ValueError("metric name '%s' does not match [a-z_0-9]+" % metric_name)
-
+            raise ValueError("metric name '%s' does not match ^[a-z_0-9]+$" % metric_name)
         metrics.append(AwsMetric(
             name=metric_name,
             description=get_field("description", metric_name, parsed_metric).strip(),
             service=get_field("service", metric_name, parsed_metric).strip(),
             paginator=get_field("paginator", metric_name, parsed_metric).strip(),
-            paginator_args=parsed_metric.get("paginator_args", {}),
-            update_freq_mins=parsed_metric.get("update_freq_mins", 5),
+            paginator_args=eval_paginator_args(parsed_metric.get("paginator_args", {})),
+            label_names=get_field("label_names", metric_name, parsed_metric),
             search=get_field("search", metric_name, parsed_metric).strip()
         ))
 
     return metrics
-
-
-def main():
-    # FIXME: add argparse
-    with open(sys.argv[1]) as metrics_file:
-        cfg = metrics_file.read()
-    registry = REGISTRY
-
-    metrics = parse_aws_metrics(cfg)
-    for metric in metrics:
-        session = boto3.session.Session()
-        thread = AwsMetricCollectorThread(metric, registry, session)
-        thread.start()
-
-    start_http_server(8000)
-    print("Server started.")
-
-    while True:
-        time.sleep(1000)
-
-
-if __name__ == "__main__":
-    main()

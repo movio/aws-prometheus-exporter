@@ -2,8 +2,10 @@
 
 import unittest.mock as mock
 from collections import namedtuple
+import datetime
 
-from aws_prometheus_exporter import parse_aws_metrics, AwsMetric, AwsMetricCollectorThread
+from aws_prometheus_exporter import parse_aws_metrics, AwsMetric, AwsMetricsCollector
+from prometheus_client.core import Sample
 
 # pylint: disable=protected-access
 
@@ -16,9 +18,27 @@ ec2_instance_ids:
     Filters:
       - Name: instance-state-name
         Values: [ "Running" ]
+  label_names:
+    - id
   search: |
     Reservations[].Instances[].{id: InstanceId, value: `1`}[]
 """
+
+SINGLE_METRIC_YAML_NEEDING_EVAL = """
+recent_emr_cluster_ids:
+  description: Recent EMR cluster ids
+  service: emr
+  paginator: list_clusters
+  paginator_args: |
+    {
+        "CreatedAfter": datetime(2018,1,1) - timedelta(weeks=4)
+    }
+  label_names:
+    - id
+  search: |
+    Clusters[].{id: Id, value: `1`}
+"""
+
 
 MULTIPLE_METRICS_YAML = """
 public_ec2_instance_ids:
@@ -29,6 +49,8 @@ public_ec2_instance_ids:
     Filters:
       - Name: instance-state-name
         Values: [ "Running" ]
+  label_names:
+    - id
   search: |
     Reservations[].Instances[?PublicIpAddress].{id: InstanceId, value: `1`}[]
 
@@ -42,6 +64,8 @@ ssm_agents_ec2_instance_ids:
         Values: [ "EC2Instance" ]
       - Key: PingStatus
         Values: [ "Online" ]
+  label_names:
+    - id
   search: |
     InstanceInformationList[].{id: InstanceId, value: `1`}[]
 """
@@ -62,8 +86,25 @@ def test_load_single_aws_metric():
                 "Values": ["Running"]
             }]
         },
-        search="Reservations[].Instances[].{id: InstanceId, value: `1`}[]",
-        update_freq_mins=5
+        label_names=["id"],
+        search="Reservations[].Instances[].{id: InstanceId, value: `1`}[]"
+    )
+
+
+def test_load_single_aws_metric_needing_eval():
+    metrics = parse_aws_metrics(SINGLE_METRIC_YAML_NEEDING_EVAL)
+    assert len(metrics) == 1
+    ec2_instance_ids = metrics[0]
+    assert ec2_instance_ids == AwsMetric(
+        name="recent_emr_cluster_ids",
+        description="Recent EMR cluster ids",
+        service="emr",
+        paginator="list_clusters",
+        paginator_args={
+            "CreatedAfter": datetime.datetime(2017, 12, 4, 0, 0)
+        },
+        label_names=["id"],
+        search="Clusters[].{id: Id, value: `1`}"
     )
 
 
@@ -81,8 +122,8 @@ def test_load_multiple_aws_metrics():
                 "Values": ["Running"]
             }]
         },
-        search="Reservations[].Instances[?PublicIpAddress].{id: InstanceId, value: `1`}[]",
-        update_freq_mins=5
+        label_names=["id"],
+        search="Reservations[].Instances[?PublicIpAddress].{id: InstanceId, value: `1`}[]"
     )
     assert metrics[1] == AwsMetric(
         name="ssm_agents_ec2_instance_ids",
@@ -101,8 +142,8 @@ def test_load_multiple_aws_metrics():
             ]
         },
         paginator="describe_instance_information",
-        search="InstanceInformationList[].{id: InstanceId, value: `1`}[]",
-        update_freq_mins=5
+        label_names=["id"],
+        search="InstanceInformationList[].{id: InstanceId, value: `1`}[]"
     )
 
 
@@ -126,39 +167,49 @@ def create_session_mocks(search_response_iterator):
     return SessionMocks(session, service, paginator, paginate_response_iterator)
 
 
-def test_get_response_iterator():
-    response_iterator = iter(["instance_id_1", "instance_id_2", "instance_id_3"])
-    mocks = create_session_mocks(response_iterator)
+def test_collect_metric():
+    mocks = create_session_mocks([
+        {"id": "instance_id_1", "value": 1},
+        {"id": "instance_id_2", "value": 1},
+        {"id": "instance_id_3", "value": 1}
+    ])
     metrics = parse_aws_metrics(SINGLE_METRIC_YAML)
-    assert len(metrics) == 1
-    thread = AwsMetricCollectorThread(metric=metrics[0], registry=None, session=mocks.session)
-    assert response_iterator is thread._get_response_iterator()
+    collector = AwsMetricsCollector(metrics, mocks.session)
+    collector.update()
+    gauge_family = list(collector.collect())[0]
     mocks.session.client.assert_called_once_with("ec2")
     mocks.service.get_paginator.assert_called_once_with("describe_instances")
     mocks.paginator.paginate.assert_called_once_with(Filters=[{
         "Name": "instance-state-name",
         "Values": ["Running"]
     }])
-    mocks.paginate_response_iterator.search.assert_called_once_with(
-        "Reservations[].Instances[].{id: InstanceId, value: `1`}[]")
+    mocks.paginate_response_iterator.search.assert_called_once_with(metrics[0].search)
+    assert gauge_family.samples == [
+        Sample("ec2_instance_ids", {"id": "instance_id_1"}, 1),
+        Sample("ec2_instance_ids", {"id": "instance_id_2"}, 1),
+        Sample("ec2_instance_ids", {"id": "instance_id_3"}, 1)
+    ]
 
 
-def test_run_metric():
-    response_iterator = iter([
+def test_collect_metric_with_extra_labels():
+    mocks = create_session_mocks([
         {"id": "instance_id_1", "value": 1},
         {"id": "instance_id_2", "value": 1},
         {"id": "instance_id_3", "value": 1}
     ])
-    mocks = create_session_mocks(response_iterator)
     metrics = parse_aws_metrics(SINGLE_METRIC_YAML)
-    assert len(metrics) == 1
-    thread = AwsMetricCollectorThread(metric=metrics[0], registry=None, session=mocks.session)
-    thread._step()
-    gauge = thread.gauge
-    assert gauge._labelnames == ("id",)
-    metric_values = {labels: gauge._value._value for labels, gauge in gauge._metrics.items()}
-    assert metric_values == {
-        ('instance_id_1',): 1.0,
-        ('instance_id_2',): 1.0,
-        ('instance_id_3',): 1.0
-    }
+    collector = AwsMetricsCollector(metrics, mocks.session, ["region_name", "env"], ["us-east-1", "dev"])
+    collector.update()
+    gauge_family = list(collector.collect())[0]
+    mocks.session.client.assert_called_once_with("ec2")
+    mocks.service.get_paginator.assert_called_once_with("describe_instances")
+    mocks.paginator.paginate.assert_called_once_with(Filters=[{
+        "Name": "instance-state-name",
+        "Values": ["Running"]
+    }])
+    mocks.paginate_response_iterator.search.assert_called_once_with(metrics[0].search)
+    assert gauge_family.samples == [
+        Sample("ec2_instance_ids", {"region_name": "us-east-1", "env": "dev", "id": "instance_id_1"}, 1),
+        Sample("ec2_instance_ids", {"region_name": "us-east-1", "env": "dev", "id": "instance_id_2"}, 1),
+        Sample("ec2_instance_ids", {"region_name": "us-east-1", "env": "dev", "id": "instance_id_3"}, 1)
+    ]
