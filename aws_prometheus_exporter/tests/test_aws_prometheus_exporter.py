@@ -194,7 +194,7 @@ def test_collect_metric():
 def test_collect_metric_convert_nulls():
     mocks = create_session_mocks([
         {"id": None, "value": 1},
-        {"id": None, "value": 1},
+        {"id": "", "value": 1},
         {"id": "instance_id_3", "value": 1}
     ])
     metrics = parse_aws_metrics(SINGLE_METRIC_YAML)
@@ -210,7 +210,7 @@ def test_collect_metric_convert_nulls():
     mocks.paginate_response_iterator.search.assert_called_once_with(metrics[0].search)
     assert gauge_family.samples == [
         Sample("ec2_instance_ids", {"id": "<null>"}, 1),
-        Sample("ec2_instance_ids", {"id": "<null>"}, 1),
+        Sample("ec2_instance_ids", {"id": ""}, 1),
         Sample("ec2_instance_ids", {"id": "instance_id_3"}, 1)
     ]
 

@@ -9,7 +9,7 @@ See https://github.com/movio/aws-prometheus-exporter for usage and instructions.
 
 setup(
     name="aws-prometheus-exporter",
-    version="0.1.1",
+    version="0.1.2",
     author="Movio Developers",
     author_email="nicolas@movio.co",
     description="AWS exporter for Prometheus",
