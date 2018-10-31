@@ -99,7 +99,7 @@ class AwsMetricsCollector:
             assert "value" in response, "response object '%s' is missing a 'value' property" % response
             assert isinstance(response["value"], (float, int)), "the `value` property must be a number"
             value = response.pop("value")
-            result.append((self._label_values + [response[label] for label in metric.label_names], value))
+            result.append((self._label_values + [response[label] or '<null>' for label in metric.label_names], value))
         return result
 
 
