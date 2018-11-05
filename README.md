@@ -6,7 +6,6 @@ Metrics must be described in YAML. For example:
 ```yaml
 ec2_instance_ids:
   description: EC2 instance ids
-  value_label: instance_id
   service: ec2
   paginator: describe_instances
   paginator_args:
@@ -27,7 +26,21 @@ result = boto3.client("ec2") \
             .search("Reservations[].Instances[].{instance_id: InstanceId, value: `1`}")
 ```
 
-The dict values returned by the paginator are then converted by this module into `GaugeMetricFamily` samples.
+You aren't restricted to calling paginators. By specifying `method` and `method_args` in place of `paginator` and `paginator_args`, you can call any service method. Pagination will be handled for you in the following fashion:
+
+```python
+  service = boto3.client("ec2")
+  next_token = ''
+  result = []
+  kwargs = {"Filters": [{"Name": "instance-state-name", "Values": ["running"]}]}
+  while next_token is not None:
+      response = boto3.client("ec2").describe_instances(**kwargs)
+      next_token = response.get('NextToken', None)
+      result += jmespath.search("Reservations[].Instances[].{instance_id: InstanceId, value: `1`}", response)
+      kwargs["NextToken"] = next_token  
+```
+
+The dict values returned by the paginator or service method are then converted by this module into `GaugeMetricFamily` samples.
 Each dict must have the same keys as `label_names`, plus an additional `value` key; the corresponding values correspond to the labels and value of the created Gauge, respectively.
 
 Note that `pagninator_args` may be a string. In that case, it will be `eval`-ed with access to `datetime.datetime` and `datetime.timedelta`. For example:

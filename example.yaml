@@ -1,9 +1,8 @@
 ec2_instance_ids:
   description: EC2 instance ids
-  value_label: instance_id
   service: ec2
-  paginator: describe_instances
-  paginator_args:
+  method: describe_instances
+  method_args:
     Filters:
       - Name: instance-state-name
         Values: [ "running" ]
