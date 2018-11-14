@@ -14,4 +14,5 @@ EXPOSE 9000
 
 ENV PYTHONPATH="/opt"
 
-ENTRYPOINT ["python", "-u", "/opt/aws_prometheus_exporter", "-p", "9000", "-f", "/mnt/metrics.yaml", "-s", "300"]
+ENTRYPOINT [ "python", "-u", "/opt/aws_prometheus_exporter", "-p", "9000" ]
+CMD [ "-f", "/mnt/metrics.yaml", "-s", "300" ]
